@@ -8,18 +8,142 @@ output:
 
 ## Loading and preprocessing the data
 
+```{r message=FALSE, warning=FALSE, results="hide"}
+require(readr)
+require(dplyr)
+require(ggplot2)
+require(lubridate)
 
+activity.df <- read_csv("activity.zip")
+```
+
+
+Here is a quick look at the data.
+```{r}
+summary(activity.df)
+str(activity.df)
+```
+
+The interval code appears to denote the number of minutes from the beginning of an hour.
+Let's look at the complete unique set of values:
+```{r}
+unique(activity.df$interval)
+```
+The interval codes follow the pattern of using the two least significant digits for the minutes of the hour, from 0 to 55, and the two  most significant digits are used for the hour of the day, from 0 (left off) to 23.
+That means that for time series graphs, you have to either use the codes as ordered factors or convert to a common time unit (e.g., hours).
 
 ## What is mean total number of steps taken per day?
+To obtain meaningful mean and median values for steps taken per day, we must be able to identify
+days that had no data and not include them (the sum() function returns zero when no non-NA values are presented and na.rm=TRUE is selected; a daily total of zero will improperly skew the mean and median values).
+```{r message=FALSE, warning=FALSE}
+steps.per.day <- activity.df%>%group_by(date)%>%summarise(had.data=sum(!is.na(steps))>0,
+                                                          total.steps=sum(steps,na.rm=TRUE))
 
+ggplot(steps.per.day%>%filter(had.data),aes(total.steps))+geom_histogram()+
+    labs(title="Distribution of daily step totals")
 
+steps.mean.med <- steps.per.day%>%filter(had.data)%>%
+    summarise(mean.steps.per.day=round(mean(total.steps)),median.steps.per.day=median(total.steps))
+```
+
+The mean number of steps per day is `r as.integer(steps.mean.med$mean.steps.per.day)`,
+and the median number of steps per day is `r steps.mean.med$median.steps.per.day`.
 
 ## What is the average daily activity pattern?
+To properly scale the data on a time axis, the interval code must be translated to a time value.
+```{r}
+steps.per.interval <- activity.df%>%group_by(interval)%>%
+    summarise(mean.per.interval=mean(steps,na.rm=TRUE))%>%
+    mutate(interval.hour=interval%/%100+(interval%%100)/60)
 
+ggplot(steps.per.interval,aes(interval.hour,mean.per.interval))+geom_line()+
+    labs(title="Per interval average number of steps",x="hour of day",y="mean steps per interval")
+```
 
+Identify the interval with the largest average step count and what that count is:
+
+```{r}
+max.count.interval <- steps.per.interval%>%
+    filter(mean.per.interval==max(mean.per.interval,na.rm=TRUE))%>%
+    mutate(time=paste(interval%/%100,interval%%100,sep=":"))
+```
+The maximum step count average was `r round(max.count.interval$mean.per.interval)`,
+which occured during
+the interval coded as `r max.count.interval$interval` or `r max.count.interval$time`.
 
 ## Imputing missing values
 
+```{r}
+missing.values <- activity.df%>%filter(is.na(steps))%>%count%>%rename(missing.values=n)
+```
+There are `r missing.values` missing step counts.
 
+Let's look at the pattern of missing values.
+As opposed to having random entries missing, whole days are missing:
+```{r}
+(missing.stats <- activity.df%>%group_by(date)%>%summarise(cnt=n(),missing.cnt=sum(is.na(steps)))%>%
+    mutate(pct.missing=round(missing.cnt*100/cnt,digits=2))%>%count(pct.missing)%>%
+    rename(days=n))
+```
+So, there are `r missing.stats$days[1]` days missing `r missing.stats$pct.missing[1]`% and
+`r missing.stats$days[2]` days missing `r missing.stats$pct.missing[2]`%.
+
+
+The strategy employed here to impute missing values is to use the mean count of steps per interval
+to maintain
+the relative distribution of step counts across intervals.
+Conveniently, mean count of steps  per interval is already calculated.
+
+To impute the missing values, first make a copy of the original data:
+```{r}
+activity.imp.df <- activity.df
+```
+Then assign the missing step entries the mean step count for the corresponding interval.
+```{r}
+activity.imp.df[is.na(activity.df$steps),"steps"] <-
+    left_join(activity.df[is.na(activity.df$steps),],
+              steps.per.interval%>%select(mean.per.interval,interval),
+              by="interval")$mean.per.interval
+```
+Now for the distribution of the data with the missing values imputed:
+```{r message=FALSE, warning=FALSE}
+steps.per.day.imp <- activity.imp.df%>%group_by(date)%>%summarise(had.data=sum(!is.na(steps))>0,
+                                                          total.steps=sum(steps,na.rm=TRUE))
+
+ggplot(steps.per.day.imp%>%filter(had.data),aes(total.steps))+geom_histogram()+
+    labs(title="Distribution of daily step totals with missing values imputed")
+
+steps.mean.med.imp <- steps.per.day.imp%>%filter(had.data)%>%
+    summarise(mean.steps.per.day=round(mean(total.steps)),
+              median.steps.per.day=round(median(total.steps)))
+```
+Using the data set with missing values imputed, the mean number of steps per day  is `r as.integer(steps.mean.med.imp$mean.steps.per.day)`,
+and the median number of steps per day is `r as.integer(steps.mean.med.imp$median.steps.per.day)`.
+ 
+For the imputed data set, both the histogram (distribution) and mean and median of daily step totals are the same as with the original data set with the missing values ignored when calculating the
+summary statistics.
+It is not unreasonable for the distribution and summary statistics to be the same since summary statistics were used to fill in the missing values.
 
 ## Are there differences in activity patterns between weekdays and weekends?
+Lets add a new column to the imputed data set that indicates whether the day is a weekday or weekend.
+```{r}
+activity.imp.wd.df <- activity.imp.df%>%
+    mutate(wd=as.factor(ifelse(wday(date,label=TRUE)%in%c("Sun","Sat"),"weekend","weekday")))
+```
+Now, aggregate statistics by day type and interval:
+```{r}
+steps.per.interval.daytype <- activity.imp.wd.df%>%group_by(wd,interval)%>%
+    summarise(mean.per.interval=mean(steps,na.rm=TRUE))%>%
+    mutate(interval.hour=interval%/%100+(interval%%100)/60)
+```
+And plot it:
+```{r}
+ggplot(steps.per.interval.daytype,aes(interval.hour,mean.per.interval))+facet_wrap(~wd,ncol=1)+
+    geom_line()+
+    labs(title="Per interval average number of steps by day type",x="hour of day",
+         y="mean steps per interval")
+
+```
+
+Yes, the weekday pattern is different from the weekend pattern, and the difference is that
+activity starts and ends earlier on weekdays than on weekends, which agrees with common experience.
